@@ -106,6 +106,8 @@ table.data td.act button:hover{color:var(--danger); background:#fef2f2}
 .seg button{border:none; background:#fff; padding:6px 10px; cursor:pointer; font-weight:600; color:var(--muted)}
 .seg button+button{border-left:1px solid var(--line)}
 .seg button.on{background:var(--accent); color:#fff}
+.seg.full{display:flex; width:100%}
+.seg.full button{flex:1; white-space:nowrap; padding:6px 4px; text-align:center}
 .notice{padding:8px 10px; border-radius:8px; font-size:12px; margin-top:8px; display:none}
 .notice.ok{background:#ecfdf5; color:#065f46; display:block}
 .notice.err{background:#fef2f2; color:#991b1b; display:block}
@@ -118,6 +120,7 @@ table.data td.act button:hover{color:var(--danger); background:#fef2f2}
   <span class="sub">X·Y 좌표 + 연마량 → 2D 맵 / 3D 표면</span>
   <span class="spacer"></span>
   <span class="badge" id="hdCount">0 점</span>
+  <button class="btn" id="btnUndo" title="되돌리기 (Ctrl+Z)" disabled>↩ 되돌리기</button>
   <button class="btn" id="btnSaveJson">프로젝트 저장(.json)</button>
   <button class="btn" id="btnLoadJson">불러오기</button>
   <input type="file" id="fileJson" accept=".json,.csv,.txt" style="display:none">
@@ -184,9 +187,18 @@ table.data td.act button:hover{color:var(--danger); background:#fef2f2}
         <label class="check"><input type="checkbox" id="mapVal"> 연마량 값 표시</label>
         <label class="check"><input type="checkbox" id="mapColor" checked> 연마량으로 색칠</label>
         <label class="check"><input type="checkbox" id="mapGrid" checked> 격자선</label>
-        <label class="check"><input type="checkbox" id="mapAdd"> 클릭해서 점 추가</label>
+        <div style="margin-bottom:8px">
+          <div style="color:var(--muted); font-size:12px; margin-bottom:5px">클릭 동작</div>
+          <div class="seg full" id="mapMode">
+            <button data-mode="select" class="on">선택</button>
+            <button data-mode="add">점 추가</button>
+            <button data-mode="del">점 삭제</button>
+          </div>
+        </div>
         <div class="row"><label>점 크기</label><div class="grow"><input type="range" id="mapSize" min="2" max="14" step="0.5" value="6"></div></div>
-        <div class="row"><label>스냅</label><div class="grow"><input type="number" id="mapSnap" value="0" step="any" min="0"></div><span class="hint">mm</span></div>
+        <div class="row"><label>추가 스냅</label><div class="grow"><input type="number" id="mapSnap" value="0" step="any" min="0"></div><span class="hint">mm</span></div>
+        <div class="btns"><button class="btn dgr" id="btnDelSel" disabled>선택한 점 삭제 (Del)</button></div>
+        <p class="hint" style="margin:8px 0 0">점 <b>우클릭</b>은 어떤 모드에서든 바로 삭제합니다. 클릭으로 선택한 뒤 <span class="kbd">Del</span> 키도 가능하고, 잘못 지웠다면 <span class="kbd">Ctrl</span>+<span class="kbd">Z</span> 로 되돌립니다.</p>
       </div>
     </div>
 
@@ -428,14 +440,44 @@ const S = {
   selected: -1,
   unit: 'µm',
   tab: 'data',
-  pasteMode: 'xyv'
+  pasteMode: 'xyv',
+  mapMode: 'select',   // 배치도 클릭 동작: select | add | del
+  undo: []             // 되돌리기 스냅샷
 };
+const UNDO_MAX = 30;
+/** 변경 직전 상태를 저장 (되돌리기용) */
+function pushUndo(){
+  S.undo.push(S.points.map(p => ({x:p.x, y:p.y, v:p.v})));
+  if(S.undo.length > UNDO_MAX) S.undo.shift();
+  updateEditButtons();
+}
+function undoLast(){
+  if(!S.undo.length) return;
+  S.points = S.undo.pop();
+  S.selected = -1;
+  refreshAll();
+}
+/** 점 삭제 (표·배치도 공용) */
+function deletePoint(i){
+  if(i < 0 || i >= S.points.length) return;
+  pushUndo();
+  S.points.splice(i, 1);
+  if(S.selected === i) S.selected = -1;
+  else if(S.selected > i) S.selected--;
+  refreshAll();
+}
+function updateEditButtons(){
+  const u = document.getElementById('btnUndo');
+  if(u) u.disabled = !S.undo.length;
+  const d = document.getElementById('btnDelSel');
+  if(d) d.disabled = S.selected < 0;
+}
 const LSKEY = 'removal-viz-v1';
 
 function saveLocal(){
   try{
     localStorage.setItem(LSKEY, JSON.stringify({
-      points: S.points, unit: S.unit, ui: collectUI()
+      points: S.points, unit: S.unit, mapMode: S.mapMode, ui: collectUI()
     }));
   }catch(e){}
 }
@@ -449,6 +491,7 @@ function loadLocal(){
     if(!o || !Array.isArray(o.points) || !o.points.length) return false;
     S.points = o.points.map(p=>({x:+p.x, y:+p.y, v:(p.v==null||p.v==='')?null:+p.v}));
     if(o.unit) S.unit = o.unit;
+    if(o.mapMode) S.mapMode = o.mapMode;
     if(o.ui) applyUI(o.ui);
     return true;
   }catch(e){ return false; }
@@ -548,6 +591,7 @@ function setPoints(list, keepSel){
 function refreshAll(){
   invalidateGrid();
   renderStats();
+  updateEditButtons();
   if(S.tab === 'data') renderTable();
   drawCurrent();
   saveLocalD();
@@ -973,7 +1017,11 @@ function drawMap(){
   })();
   if(useColor && valued().length) drawColorbar(ctx, w, h, lo, hi, '연마량 ('+S.unit+')');
   const bb = bounds(S.points);
-  $('#mapInfo').textContent = '영역: X ' + fmt(bb.x0,2) + ' ~ ' + fmt(bb.x1,2) + ' mm · Y ' + fmt(bb.y0,2) + ' ~ ' + fmt(bb.y1,2) + ' mm · ' + S.points.length + ' 점';
+  const modeTxt = {select:'클릭=선택 · 더블클릭=값 입력 · 우클릭=삭제',
+                   add:'클릭=점 추가 · 우클릭=삭제 · Ctrl+Z=되돌리기',
+                   del:'클릭=점 삭제 · Ctrl+Z=되돌리기'}[S.mapMode];
+  $('#mapInfo').textContent = '영역: X ' + fmt(bb.x0,2) + ' ~ ' + fmt(bb.x1,2) + ' mm · Y ' + fmt(bb.y0,2) + ' ~ ' + fmt(bb.y1,2)
+    + ' mm · ' + S.points.length + ' 점  |  ' + modeTxt;
 }
 
 /* ---------- 12. ③ 2D 연마량 맵 ---------- */
@@ -1315,16 +1363,12 @@ $('#tbody').addEventListener('input', e => {
 const drawSoon = debounce(drawCurrent, 250);
 $('#tbody').addEventListener('click', e => {
   const del = e.target.closest('button[data-del]');
-  if(del){
-    const i = +del.dataset.del;
-    S.points.splice(i, 1);
-    if(S.selected === i) S.selected = -1; else if(S.selected > i) S.selected--;
-    refreshAll(); return;
-  }
+  if(del){ deletePoint(+del.dataset.del); return; }
   const tr = e.target.closest('tr');
   if(tr){
     S.selected = +tr.dataset.i;
     $$('#tbody tr').forEach(r => r.classList.toggle('sel', +r.dataset.i === S.selected));
+    updateEditButtons();
   }
 });
 $('#tbody').addEventListener('keydown', e => {
@@ -1336,6 +1380,7 @@ $('#tbody').addEventListener('keydown', e => {
   if(nxt){ nxt.focus(); nxt.select(); }
 });
 $('#btnAddRow').addEventListener('click', () => {
+  pushUndo();
   const last = S.points[S.points.length-1];
   S.points.push({x: last ? last.x : 0, y: last ? last.y : 0, v: null});
   S.selected = S.points.length-1;
@@ -1343,16 +1388,18 @@ $('#btnAddRow').addEventListener('click', () => {
   const el = document.querySelector('#tbody input[data-i="'+S.selected+'"][data-f="x"]');
   if(el){ el.scrollIntoView({block:'center'}); el.focus(); el.select(); }
 });
-$('#btnSortRows').addEventListener('click', () => { S.points.sort((a,b)=> b.y-a.y || b.x-a.x); S.selected=-1; refreshAll(); });
-$('#btnClearVals').addEventListener('click', () => { if(!confirm('연마량 값을 모두 비웁니다. 좌표는 유지됩니다.')) return; S.points.forEach(p=>p.v=null); refreshAll(); });
-$('#btnClearAll').addEventListener('click', () => { if(!confirm('모든 좌표와 값을 삭제합니다.')) return; setPoints([]); });
+$('#btnSortRows').addEventListener('click', () => { pushUndo(); S.points.sort((a,b)=> b.y-a.y || b.x-a.x); S.selected=-1; refreshAll(); });
+$('#btnClearVals').addEventListener('click', () => { if(!confirm('연마량 값을 모두 비웁니다. 좌표는 유지됩니다.')) return; pushUndo(); S.points.forEach(p=>p.v=null); refreshAll(); });
+$('#btnClearAll').addEventListener('click', () => { if(!confirm('모든 좌표와 값을 삭제합니다.')) return; pushUndo(); setPoints([]); });
 $('#btnLoadDefault').addEventListener('click', () => {
   const keep = S.points.length && confirm('기존 데이터를 지우고 기본 좌표(233점)를 불러올까요?\n[취소]를 누르면 기존 데이터를 유지한 채 아무 것도 하지 않습니다.');
   if(S.points.length && !keep) return;
+  pushUndo();
   setPoints(buildDefaultPoints());
 });
 $('#btnDemo').addEventListener('click', () => {
   // 예시: 중심 대비 가장자리가 더 많이 깎이는 전형적 연마 프로파일 + 약간의 비대칭/노이즈
+  pushUndo();
   const b = bounds(S.points), R = Math.max(b.x1-b.x0, b.y1-b.y0)/2 || 1;
   for(const p of S.points){
     const r = Math.hypot(p.x, p.y)/R;
@@ -1373,6 +1420,7 @@ function applyPaste(append){
   if(S.pasteMode === 'v'){
     const vals = parseValues(txt);
     if(!vals.length){ notice(msg, '숫자를 찾지 못했습니다.', false); return; }
+    pushUndo();
     const n = Math.min(vals.length, S.points.length);
     for(let i=0;i<n;i++) S.points[i].v = vals[i];
     refreshAll(); syncLabels();
@@ -1380,6 +1428,7 @@ function applyPaste(append){
   } else {
     const rows = parseTable(txt);
     if(!rows.length){ notice(msg, '유효한 X·Y 좌표를 찾지 못했습니다.', false); return; }
+    pushUndo();
     setPoints(append ? S.points.concat(rows) : rows);
     syncLabels();
     notice(msg, rows.length + '개 좌표를 ' + (append ? '추가했습니다.' : '적용했습니다.'), true);
@@ -1401,6 +1450,7 @@ $('#fileJson').addEventListener('change', e => {
   rd.onload = () => {
     const txt = String(rd.result);
     try{
+      pushUndo();
       if(/\.json$/i.test(f.name)){
         const o = JSON.parse(txt);
         const list = Array.isArray(o) ? o : o.points;
@@ -1462,25 +1512,65 @@ function bindHover(cvId, tipId, getF){
 bindHover('cvMap', 'tipMap', () => FMAP);
 bindHover('cv2d', 'tip2d', () => F2D);
 
-$('#cvMap').addEventListener('click', e => {
-  if(!FMAP) return;
+const HIT_PX = 18;   // 점을 집었다고 볼 화면상 거리(px)
+/** 배치도 화면좌표 → 데이터좌표 + 히트테스트 */
+function mapPick(e){
   const r = e.currentTarget.getBoundingClientRect();
   const x = FMAP.invX(e.clientX - r.left), y = FMAP.invY(e.clientY - r.top);
-  if($('#mapAdd').checked){
+  const np = nearestPoint(x, y);
+  return {x, y, hit:(np.i >= 0 && np.d*FMAP.sc < HIT_PX) ? np.i : -1};
+}
+function setMapMode(m){
+  S.mapMode = m;
+  $$('#mapMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+  $('#cvMap').style.cursor = m === 'add' ? 'crosshair' : (m === 'del' ? 'pointer' : 'default');
+  drawMap(); saveLocalD();
+}
+$('#mapMode').addEventListener('click', e => { const b = e.target.closest('button'); if(b) setMapMode(b.dataset.mode); });
+$('#btnDelSel').addEventListener('click', () => deletePoint(S.selected));
+$('#btnUndo').addEventListener('click', undoLast);
+
+$('#cvMap').addEventListener('click', e => {
+  if(!FMAP) return;
+  const pick = mapPick(e);
+  if(S.mapMode === 'add'){
     const snap = +$('#mapSnap').value;
-    const sx = snap > 0 ? Math.round(x/snap)*snap : +x.toFixed(2);
-    const sy = snap > 0 ? Math.round(y/snap)*snap : +y.toFixed(2);
+    const sx = snap > 0 ? Math.round(pick.x/snap)*snap : +pick.x.toFixed(2);
+    const sy = snap > 0 ? Math.round(pick.y/snap)*snap : +pick.y.toFixed(2);
+    pushUndo();
     S.points.push({x:sx, y:sy, v:null});
     S.selected = S.points.length-1;
     refreshAll();
     return;
   }
-  const np = nearestPoint(x, y);
-  S.selected = (np.i >= 0 && np.d*FMAP.sc < 18) ? np.i : -1;
+  if(S.mapMode === 'del'){
+    if(pick.hit >= 0) deletePoint(pick.hit);
+    else { S.selected = -1; updateEditButtons(); drawMap(); }
+    return;
+  }
+  S.selected = pick.hit;
+  updateEditButtons();
   drawMap();
 });
+/* 우클릭: 모드와 상관없이 그 점을 바로 삭제 */
+$('#cvMap').addEventListener('contextmenu', e => {
+  if(!FMAP) return;
+  e.preventDefault();
+  const pick = mapPick(e);
+  if(pick.hit >= 0) deletePoint(pick.hit);
+});
+/* Del/Backspace = 선택한 점 삭제, Ctrl+Z = 되돌리기 */
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if((e.key === 'Delete' || (e.key === 'Backspace' && S.tab === 'map')) && S.selected >= 0){
+    e.preventDefault(); deletePoint(S.selected);
+  } else if((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')){
+    e.preventDefault(); undoLast();
+  }
+});
 $('#cvMap').addEventListener('dblclick', e => {
-  if(!FMAP || $('#mapAdd').checked) return;
+  if(!FMAP || S.mapMode !== 'select') return;
   const r = e.currentTarget.getBoundingClientRect();
   const np = nearestPoint(FMAP.invX(e.clientX - r.left), FMAP.invY(e.clientY - r.top));
   if(np.i < 0 || np.d*FMAP.sc > 18) return;
@@ -1533,6 +1623,8 @@ document.addEventListener('visibilitychange', () => { if(document.visibilityStat
   syncLabels();
   renderStats();
   renderTable();
+  setMapMode(S.mapMode);
+  updateEditButtons();
   setTab('data');
 })();
 </script>
